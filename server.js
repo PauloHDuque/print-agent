@@ -1,10 +1,11 @@
-// server.js - A versão definitiva, sem dependências frágeis
+// server.js - Versão final, completa, autocontida e multiplataforma.
 
 const express = require("express");
 const cors = require("cors");
-const { exec } = require("child_process"); // Módulo nativo do Node.js
-const fs = require("fs"); // Módulo nativo para lidar com arquivos
-const path = require("path"); // Módulo nativo para lidar com caminhos
+// Importamos tanto 'exec' (para comandos simples) quanto 'spawn' (para comandos complexos)
+const { exec, spawn } = require("child_process");
+const fs = require("fs");
+const path = require("path");
 
 const app = express();
 const PORT = 9100;
@@ -16,81 +17,62 @@ app.use(express.json());
 app.get("/status", (req, res) => {
   res.json({
     status: "online",
-    message: "Print Agent está rodando de forma estável.",
+    message: "Print Agent está rodando.",
   });
 });
 
 /**
- * Rota para Listar Impressoras usando comandos nativos do SO.
- * Isso elimina a necessidade de bibliotecas com compilação C++.
+ * Rota para Listar Impressoras (VERSÃO ESTÁVEL e MULTIPLATAFORMA)
+ * Usa o comando WMIC (Windows) ou lpstat (Linux/macOS) para obter
+ * a lista de impressoras em tempo real.
  */
 app.get("/printers", (req, res) => {
   // --- LÓGICA PARA WINDOWS ---
   if (process.platform === "win32") {
-    const listPrintersCommand =
-      'powershell -command "Get-Printer | Select-Object Name, DriverName, PortName | ConvertTo-Json"';
-    const getDefaultPrinterCommand =
-      'powershell -command "(Get-Printer | Where-Object IsDefault -eq $true).Name"';
+    const command = "wmic printer get Name,DriverName,Default /format:csv";
 
-    // 1. Primeiro, executamos o comando para pegar o nome da impressora padrão
-    exec(
-      getDefaultPrinterCommand,
-      (errorDefault, stdoutDefault, stderrDefault) => {
-        if (errorDefault) {
-          // Não é um erro fatal, apenas logamos. A lista ainda será retornada.
-          console.error(
-            "Aviso: Não foi possível determinar a impressora padrão.",
-            stderrDefault
-          );
-        }
-        // Limpa qualquer espaço em branco ou quebra de linha do resultado
-        const defaultPrinterName = stdoutDefault.trim();
-
-        // 2. Agora, executamos o comando para listar todas as impressoras
-        exec(listPrintersCommand, (errorList, stdoutList, stderrList) => {
-          if (errorList) {
-            console.error("Erro ao listar impressoras:", stderrList);
-            return res
-              .status(500)
-              .json({
-                error: "Falha ao obter a lista de impressoras.",
-                details: stderrList,
-              });
-          }
-
-          try {
-            // O powershell pode retornar um único objeto ou um array, então garantimos que seja sempre um array
-            const printers = JSON.parse(
-              Array.isArray(JSON.parse(stdoutList))
-                ? stdoutList
-                : `[${stdoutList}]`
-            );
-
-            // 3. Combinamos as informações, marcando a impressora padrão
-            const formattedPrinters = printers.map((p) => ({
-              name: p.Name,
-              driverName: p.DriverName,
-              portName: p.PortName,
-              isDefault: p.Name === defaultPrinterName,
-            }));
-
-            res.json(formattedPrinters);
-          } catch (parseError) {
-            console.error(
-              "Erro ao parsear a lista de impressoras do PowerShell:",
-              parseError
-            );
-            res
-              .status(500)
-              .json({
-                error: "Falha ao interpretar a resposta do sistema.",
-                details: stdoutList,
-              });
-          }
+    exec(command, (error, stdout, stderr) => {
+      if (error) {
+        console.error("Erro ao executar WMIC:", error);
+        return res.status(500).json({
+          error: "Falha crítica ao consultar impressoras via WMIC.",
+          details: stderr,
         });
       }
-    );
+      try {
+        const lines = stdout
+          .trim()
+          .split("\r\n")
+          .filter((line) => line.length > 0);
+        if (lines.length <= 1) {
+          return res.json([]);
+        }
 
+        const headers = lines[0].split(",");
+        const printerData = lines.slice(1);
+        const nameIndex = headers.indexOf("Name");
+        const driverIndex = headers.indexOf("DriverName");
+        const defaultIndex = headers.indexOf("Default");
+
+        const printers = printerData.map((line) => {
+          const columns = line.split(",");
+          return {
+            name: columns[nameIndex] || null,
+            driverName: columns[driverIndex] || null,
+            isDefault: columns[defaultIndex]
+              ? columns[defaultIndex].toUpperCase() === "TRUE"
+              : false,
+          };
+        });
+        res.json(printers);
+      } catch (parseError) {
+        console.error("Erro ao parsear a saída do WMIC:", parseError);
+        res.status(500).json({
+          error: "Falha ao interpretar a resposta do sistema via WMIC.",
+          details: stdout,
+        });
+      }
+    });
     // --- LÓGICA PARA LINUX e macOS ---
   } else {
     const command = "lpstat -p -d";
@@ -99,19 +81,14 @@ app.get("/printers", (req, res) => {
         console.error(
           `Erro ao listar impressoras (Linux/macOS): ${error.message}`
         );
-        return res
-          .status(500)
-          .json({
-            error: "Falha ao obter a lista de impressoras.",
-            details: stderr,
-          });
+        return res.status(500).json({
+          error: "Falha ao obter a lista de impressoras.",
+          details: stderr,
+        });
       }
-
       try {
         const lines = stdout.trim().split("\n");
         let defaultPrinter = "";
-
-        // Encontra a linha que define a impressora padrão do sistema
         const defaultLine = lines.find((line) =>
           line.includes("system default destination:")
         );
@@ -119,7 +96,6 @@ app.get("/printers", (req, res) => {
           defaultPrinter = defaultLine.split(":")[1].trim();
         }
 
-        // Mapeia as linhas que contêm informações das impressoras
         const printers = lines
           .filter((line) => line.startsWith("printer "))
           .map((line) => {
@@ -127,29 +103,25 @@ app.get("/printers", (req, res) => {
             return {
               name: name,
               driverName: null, // lpstat não fornece essa info facilmente
-              portName: null, // lpstat não fornece essa info facilmente
               isDefault: name === defaultPrinter,
             };
           });
-
         res.json(printers);
       } catch (parseError) {
         console.error("Erro ao parsear a saída do lpstat:", parseError);
-        res
-          .status(500)
-          .json({
-            error: "Falha ao interpretar a resposta do sistema.",
-            details: stdout,
-          });
+        res.status(500).json({
+          error: "Falha ao interpretar a resposta do sistema (lpstat).",
+          details: stdout,
+        });
       }
     });
   }
 });
 
 /**
- * Rota para Impressão de Texto Bruto (RAW).
- * Esta rota recebe um texto e o nome da impressora e imprime usando comandos nativos.
- * Perfeito para cupons de texto simples.
+ * Rota de Impressão (VERSÃO FINAL NATIVA)
+ * Combina a criação de um arquivo temporário com a execução via 'spawn'
+ * para replicar o comando manual que funcionou.
  */
 app.post("/print/raw-text", (req, res) => {
   const { printerName, text } = req.body;
@@ -160,9 +132,10 @@ app.post("/print/raw-text", (req, res) => {
       .json({ error: 'Os campos "printerName" e "text" são obrigatórios.' });
   }
 
-  // 1. Salva o texto em um arquivo temporário
   const tempFilePath = path.join(__dirname, `print-job-${Date.now()}.txt`);
-  fs.writeFile(tempFilePath, text, (err) => {
+
+  // 1. Voltamos a criar o arquivo temporário.
+  fs.writeFile(tempFilePath, text, { encoding: "latin1" }, (err) => {
     if (err) {
       console.error("Erro ao criar arquivo temporário:", err);
       return res
@@ -170,46 +143,45 @@ app.post("/print/raw-text", (req, res) => {
         .json({ error: "Falha ao preparar dados para impressão." });
     }
 
-    // 2. Monta o comando de impressão nativo
-    let printCommand;
-    if (process.platform === "win32") {
-      // No Windows, o comando 'print' envia o arquivo para a impressora especificada
-      printCommand = `print /D:"${printerName}" "${tempFilePath}"`;
-    } else {
-      // No Linux/macOS, o comando 'lp' faz o mesmo
-      printCommand = `lp -d "${printerName}" "${tempFilePath}"`;
-    }
+    // 2. Montamos o comando EXATO que funcionou no teste manual.
+    const command = `Get-Content -Path '${tempFilePath}' | Out-Printer -Name '${printerName}'`;
 
-    // 3. Executa o comando
-    exec(printCommand, (error, stdout, stderr) => {
-      // 4. Deleta o arquivo temporário depois de imprimir
-      fs.unlink(tempFilePath, (unlinkErr) => {
-        if (unlinkErr)
-          console.error(
-            "Aviso: não foi possível deletar o arquivo temporário:",
-            unlinkErr
-          );
-      });
+    // 3. Usamos spawn para executá-lo de forma robusta.
+    const ps = spawn("powershell", [
+      "-ExecutionPolicy",
+      "Bypass",
+      "-NoProfile",
+      "-Command",
+      command,
+    ]);
 
-      if (error) {
-        console.error(`Erro ao imprimir: ${error.message}`);
-        // Tenta fornecer uma mensagem de erro útil
-        let userMessage =
-          "Verifique se o nome da impressora está correto e se ela está online.";
-        if (stderr.toLowerCase().includes("unable to find printer")) {
-          userMessage = `Impressora "${printerName}" não encontrada.`;
-        }
-        return res.status(500).json({
-          error: "Falha ao enviar para a fila de impressão.",
-          details: userMessage,
-          rawError: stderr,
+    let stderr = "";
+
+    ps.stderr.on("data", (data) => {
+      console.error(`PowerShell Stderr: ${data}`);
+      stderr += data;
+    });
+
+    ps.on("close", (code) => {
+      console.log(`Processo do PowerShell finalizado com código: ${code}`);
+
+      // 4. Deletamos o arquivo temporário após a conclusão.
+      fs.unlink(tempFilePath, () => {});
+
+      if (code === 0) {
+        res.json({
+          success: true,
+          message: `Trabalho (com arquivo) enviado via spawn para a impressora "${printerName}".`,
         });
+      } else {
+        res
+          .status(500)
+          .json({
+            error:
+              "Falha ao executar o processo de impressão (com arquivo) via spawn.",
+            details: stderr,
+          });
       }
-
-      res.json({
-        success: true,
-        message: `Trabalho enviado para a impressora "${printerName}".`,
-      });
     });
   });
 });
