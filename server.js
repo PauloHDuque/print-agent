@@ -22,100 +22,70 @@ app.get("/status", (req, res) => {
 });
 
 /**
- * Rota para Listar Impressoras (VERSÃO ESTÁVEL e MULTIPLATAFORMA)
- * Usa o comando WMIC (Windows) ou lpstat (Linux/macOS) para obter
- * a lista de impressoras em tempo real.
+ * Rota para Listar Impressoras (VERSÃO DEFINITIVA E MAIS ROBUSTA)
+ * Usa um único comando WMI via PowerShell, que é mais compatível e confiável
+ * para obter todos os dados necessários (Name, DriverName, Default) de uma só vez,
+ * já no formato JSON, evitando erros de interpretação de texto.
  */
 app.get("/printers", (req, res) => {
-  // --- LÓGICA PARA WINDOWS ---
-  if (process.platform === "win32") {
-    const command = "wmic printer get Name,DriverName,Default /format:csv";
+  // Implementado apenas para Windows
+  if (process.platform !== "win32") {
+    return res
+      .status(501)
+      .json({ error: "Endpoint implementado apenas para Windows." });
+  }
 
-    exec(command, (error, stdout, stderr) => {
-      if (error) {
-        console.error("Erro ao executar WMIC:", error);
-        return res.status(500).json({
-          error: "Falha crítica ao consultar impressoras via WMIC.",
-          details: stderr,
-        });
-      }
-      try {
-        const lines = stdout
-          .trim()
-          .split("\r\n")
-          .filter((line) => line.length > 0);
-        if (lines.length <= 1) {
-          return res.json([]);
-        }
+  // Comando único e confiável que busca tudo que precisamos e já converte para JSON
+  const command =
+    'powershell -command "Get-WmiObject -Class Win32_Printer | Select-Object Name, DriverName, PortName, Default | ConvertTo-Json"';
 
-        const headers = lines[0].split(",");
-        const printerData = lines.slice(1);
-        const nameIndex = headers.indexOf("Name");
-        const driverIndex = headers.indexOf("DriverName");
-        const defaultIndex = headers.indexOf("Default");
-
-        const printers = printerData.map((line) => {
-          const columns = line.split(",");
-          return {
-            name: columns[nameIndex] || null,
-            driverName: columns[driverIndex] || null,
-            isDefault: columns[defaultIndex]
-              ? columns[defaultIndex].toUpperCase() === "TRUE"
-              : false,
-          };
-        });
-        res.json(printers);
-      } catch (parseError) {
-        console.error("Erro ao parsear a saída do WMIC:", parseError);
-        res.status(500).json({
-          error: "Falha ao interpretar a resposta do sistema via WMIC.",
-          details: stdout,
-        });
-      }
-    });
-    // --- LÓGICA PARA LINUX e macOS ---
-  } else {
-    const command = "lpstat -p -d";
-    exec(command, (error, stdout, stderr) => {
-      if (error) {
-        console.error(
-          `Erro ao listar impressoras (Linux/macOS): ${error.message}`
-        );
-        return res.status(500).json({
+  exec(command, (error, stdout, stderr) => {
+    if (error || stderr) {
+      console.error(
+        "Erro ao executar PowerShell/WMI:",
+        stderr || error.message
+      );
+      return res
+        .status(500)
+        .json({
           error: "Falha ao obter a lista de impressoras.",
           details: stderr,
         });
-      }
-      try {
-        const lines = stdout.trim().split("\n");
-        let defaultPrinter = "";
-        const defaultLine = lines.find((line) =>
-          line.includes("system default destination:")
-        );
-        if (defaultLine) {
-          defaultPrinter = defaultLine.split(":")[1].trim();
-        }
+    }
 
-        const printers = lines
-          .filter((line) => line.startsWith("printer "))
-          .map((line) => {
-            const name = line.split(" ")[1];
-            return {
-              name: name,
-              driverName: null, // lpstat não fornece essa info facilmente
-              isDefault: name === defaultPrinter,
-            };
-          });
-        res.json(printers);
-      } catch (parseError) {
-        console.error("Erro ao parsear a saída do lpstat:", parseError);
-        res.status(500).json({
-          error: "Falha ao interpretar a resposta do sistema (lpstat).",
+    try {
+      // O PowerShell pode retornar um único objeto se houver apenas uma impressora,
+      // então garantimos que o resultado seja sempre um array para o .map() funcionar.
+      const printersRaw = JSON.parse(stdout);
+      const printers = Array.isArray(printersRaw) ? printersRaw : [printersRaw];
+
+      const formattedPrinters = printers.map((p) => {
+        // Lógica de fallback para garantir que o 'name' nunca seja nulo
+        const reliableName = p.Name || p.DriverName;
+
+        return {
+          name: reliableName,
+          driverName: p.DriverName,
+          portName: p.PortName,
+          // A propriedade 'Default' do WMI já é um booleano (true/false), então não precisa de conversão
+          isDefault: p.Default,
+        };
+      });
+
+      res.json(formattedPrinters);
+    } catch (parseError) {
+      console.error(
+        "Erro ao interpretar a resposta JSON do PowerShell:",
+        parseError
+      );
+      res
+        .status(500)
+        .json({
+          error: "Falha ao interpretar a resposta do sistema.",
           details: stdout,
         });
-      }
-    });
-  }
+    }
+  });
 });
 
 /**
@@ -174,13 +144,11 @@ app.post("/print/raw-text", (req, res) => {
           message: `Trabalho (com arquivo) enviado via spawn para a impressora "${printerName}".`,
         });
       } else {
-        res
-          .status(500)
-          .json({
-            error:
-              "Falha ao executar o processo de impressão (com arquivo) via spawn.",
-            details: stderr,
-          });
+        res.status(500).json({
+          error:
+            "Falha ao executar o processo de impressão (com arquivo) via spawn.",
+          details: stderr,
+        });
       }
     });
   });

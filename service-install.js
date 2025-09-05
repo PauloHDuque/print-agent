@@ -10,7 +10,7 @@ const svc = new Service({
     "Agente de impressão para conectar sistemas web a impressoras locais.",
   // Caminho para o executável gerado pelo PKG.
   // IMPORTANTE: Este script espera que o .exe esteja na pasta 'dist'.
-  script: path.join(__dirname, "dist", "print-agent.exe"),
+  script: path.join(__dirname, "server.js"),
   nodeOptions: [], // Deixe vazio pois estamos rodando um .exe, não um script node
 });
 
