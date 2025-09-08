@@ -45,12 +45,10 @@ app.get("/printers", (req, res) => {
         "Erro ao executar PowerShell/WMI:",
         stderr || error.message
       );
-      return res
-        .status(500)
-        .json({
-          error: "Falha ao obter a lista de impressoras.",
-          details: stderr,
-        });
+      return res.status(500).json({
+        error: "Falha ao obter a lista de impressoras.",
+        details: stderr,
+      });
     }
 
     try {
@@ -78,12 +76,10 @@ app.get("/printers", (req, res) => {
         "Erro ao interpretar a resposta JSON do PowerShell:",
         parseError
       );
-      res
-        .status(500)
-        .json({
-          error: "Falha ao interpretar a resposta do sistema.",
-          details: stdout,
-        });
+      res.status(500).json({
+        error: "Falha ao interpretar a resposta do sistema.",
+        details: stdout,
+      });
     }
   });
 });
@@ -155,9 +151,9 @@ app.post("/print/raw-text", (req, res) => {
 });
 
 // ===== INICIALIZAÇÃO DO SERVIDOR =====
-app.listen(PORT, "localhost", () => {
+app.listen(PORT, "0.0.0.0", () => {
   console.log(`=================================================`);
-  console.log(`✅ Print Agent iniciado no modo estável!`);
-  console.log(`👂 Escutando em: http://localhost:${PORT}`);
+  console.log(`✅ Print Agent iniciado no modo de rede!`);
+  console.log(`👂 Escutando em: http://localhost:${PORT} e na sua rede local.`);
   console.log(`=================================================`);
 });
