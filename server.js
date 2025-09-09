@@ -1,81 +1,49 @@
-// server.js - Versão final, completa, autocontida e multiplataforma.
-
 const express = require("express");
 const cors = require("cors");
-// Importamos tanto 'exec' (para comandos simples) quanto 'spawn' (para comandos complexos)
-const { exec, spawn } = require("child_process");
-const fs = require("fs");
-const path = require("path");
+const { exec } = require("child_process");
+const escpos = require("escpos");
+escpos.USB = require("escpos-usb");
 
 const app = express();
 const PORT = 9100;
 
+app.use(express.json({ limit: "5mb" }));
 app.use(cors());
-app.use(express.json());
 
-// Rota de Status: para verificar se o agent está online
+// ROTA DE STATUS - Para verificar se o agente está online
 app.get("/status", (req, res) => {
   res.json({
     status: "online",
-    message: "Print Agent está rodando.",
+    message: "Print Agent (Modo Inteligente) está rodando.",
   });
 });
 
-/**
- * Rota para Listar Impressoras (VERSÃO DEFINITIVA E MAIS ROBUSTA)
- * Usa um único comando WMI via PowerShell, que é mais compatível e confiável
- * para obter todos os dados necessários (Name, DriverName, Default) de uma só vez,
- * já no formato JSON, evitando erros de interpretação de texto.
- */
+// ROTA PARA LISTAR IMPRESSORAS DO WINDOWS (Útil para a versão WEB)
 app.get("/printers", (req, res) => {
-  // Implementado apenas para Windows
   if (process.platform !== "win32") {
     return res
       .status(501)
       .json({ error: "Endpoint implementado apenas para Windows." });
   }
-
-  // Comando único e confiável que busca tudo que precisamos e já converte para JSON
   const command =
     'powershell -command "Get-WmiObject -Class Win32_Printer | Select-Object Name, DriverName, PortName, Default | ConvertTo-Json"';
-
   exec(command, (error, stdout, stderr) => {
-    if (error || stderr) {
-      console.error(
-        "Erro ao executar PowerShell/WMI:",
-        stderr || error.message
-      );
+    if (error || stderr)
       return res.status(500).json({
-        error: "Falha ao obter a lista de impressoras.",
-        details: stderr,
+        error: "Falha ao obter lista de impressoras.",
+        details: stderr || error.message,
       });
-    }
-
     try {
-      // O PowerShell pode retornar um único objeto se houver apenas uma impressora,
-      // então garantimos que o resultado seja sempre um array para o .map() funcionar.
       const printersRaw = JSON.parse(stdout);
       const printers = Array.isArray(printersRaw) ? printersRaw : [printersRaw];
-
-      const formattedPrinters = printers.map((p) => {
-        // Lógica de fallback para garantir que o 'name' nunca seja nulo
-        const reliableName = p.Name || p.DriverName;
-
-        return {
-          name: reliableName,
-          driverName: p.DriverName,
-          portName: p.PortName,
-          // A propriedade 'Default' do WMI já é um booleano (true/false), então não precisa de conversão
-          isDefault: p.Default,
-        };
-      });
-
+      const formattedPrinters = printers.map((p) => ({
+        name: p.Name || p.DriverName,
+        driverName: p.DriverName,
+        portName: p.PortName,
+        isDefault: p.Default,
+      }));
       res.json(formattedPrinters);
     } catch (parseError) {
-      console.error(
-        "Erro ao interpretar a resposta JSON do PowerShell:",
-        parseError
-      );
       res.status(500).json({
         error: "Falha ao interpretar a resposta do sistema.",
         details: stdout,
@@ -84,76 +52,111 @@ app.get("/printers", (req, res) => {
   });
 });
 
-/**
- * Rota de Impressão (VERSÃO FINAL NATIVA)
- * Combina a criação de um arquivo temporário com a execução via 'spawn'
- * para replicar o comando manual que funcionou.
- */
-app.post("/print/raw-text", (req, res) => {
-  const { printerName, text } = req.body;
+// ROTA PRINCIPAL PARA IMPRESSÃO DE CUPONS (WEB E MOBILE)
+// Recebe dados em JSON e usa ESC/POS para formatação e corte.
+app.post("/print/formatted-receipt", (req, res) => {
+  try {
+    const device = new escpos.USB();
+    const printer = new escpos.Printer(device);
+    const data = req.body.data;
 
-  if (!printerName || text === undefined) {
-    return res
-      .status(400)
-      .json({ error: 'Os campos "printerName" e "text" são obrigatórios.' });
-  }
-
-  const tempFilePath = path.join(__dirname, `print-job-${Date.now()}.txt`);
-
-  // 1. Voltamos a criar o arquivo temporário.
-  fs.writeFile(tempFilePath, text, { encoding: "latin1" }, (err) => {
-    if (err) {
-      console.error("Erro ao criar arquivo temporário:", err);
-      return res
-        .status(500)
-        .json({ error: "Falha ao preparar dados para impressão." });
+    if (!data) {
+      return res.status(400).json({
+        error: "O corpo da requisição precisa conter um objeto 'data'.",
+      });
     }
 
-    // 2. Montamos o comando EXATO que funcionou no teste manual.
-    const command = `Get-Content -Path '${tempFilePath}' | Out-Printer -Name '${printerName}'`;
-
-    // 3. Usamos spawn para executá-lo de forma robusta.
-    const ps = spawn("powershell", [
-      "-ExecutionPolicy",
-      "Bypass",
-      "-NoProfile",
-      "-Command",
-      command,
-    ]);
-
-    let stderr = "";
-
-    ps.stderr.on("data", (data) => {
-      console.error(`PowerShell Stderr: ${data}`);
-      stderr += data;
-    });
-
-    ps.on("close", (code) => {
-      console.log(`Processo do PowerShell finalizado com código: ${code}`);
-
-      // 4. Deletamos o arquivo temporário após a conclusão.
-      fs.unlink(tempFilePath, () => {});
-
-      if (code === 0) {
-        res.json({
-          success: true,
-          message: `Trabalho (com arquivo) enviado via spawn para a impressora "${printerName}".`,
-        });
-      } else {
-        res.status(500).json({
-          error:
-            "Falha ao executar o processo de impressão (com arquivo) via spawn.",
-          details: stderr,
+    device.open((error) => {
+      if (error) {
+        console.error("Erro ao conectar na impressora USB:", error);
+        return res.status(500).json({
+          error: "Falha ao conectar com a impressora USB.",
+          details: error.message,
         });
       }
+
+      const LARGURA = data.lineWidth || 48; // Pega a largura do front-end, ou usa 48 como padrão
+      const separador = "-".repeat(LARGURA);
+      const centralizar = (texto) =>
+        String(texto || "")
+          .padStart(Math.floor((LARGURA + String(texto || "").length) / 2), " ")
+          .padEnd(LARGURA, " ");
+
+      printer
+        .font("a")
+        .align("ct")
+        .style("b")
+        .size(1, 1)
+        .text(data.empresa.fantasia)
+        .style("normal")
+        .size(0, 0)
+        .text(centralizar(`CNPJ: ${data.empresa.cnpj}`))
+        .text(separador)
+        .text(centralizar(`COMANDA: ${data.numero}`))
+        .align("lt")
+        .text(`Cliente: ${data.cliente || "Nao informado"}`)
+        .text(
+          `Data: ${new Date(data.createdAt).toLocaleString("pt-BR", {
+            timeZone: "America/Sao_Paulo",
+          })}`
+        )
+        .text(separador);
+
+      (data.ItemComandas || []).forEach((item) => {
+        const totalLinha = (
+          parseFloat(item.quantidade) * parseFloat(item.valor_unitario)
+        ).toFixed(2);
+        const nomeItem = `${item.quantidade}x ${item.produto.nome}`.substring(
+          0,
+          LARGURA - 12
+        );
+        const linha = `${nomeItem.padEnd(
+          LARGURA - 12,
+          " "
+        )} R$${totalLinha.padStart(9, " ")}`;
+        printer.text(linha);
+      });
+
+      printer.text(separador);
+      const total = (data.ItemComandas || []).reduce(
+        (acc, item) =>
+          acc + parseFloat(item.quantidade) * parseFloat(item.valor_unitario),
+        0
+      );
+      printer
+        .align("rt")
+        .style("b")
+        .size(0, 1)
+        .text(`TOTAL: R$ ${total.toFixed(2)}`);
+
+      printer
+        .align("ct")
+        .style("normal")
+        .size(0, 0)
+        .feed(2)
+        .text("Obrigado pela preferência!")
+        .feed(3)
+        .cut()
+        .close();
+
+      res.json({
+        success: true,
+        message: "Cupom formatado enviado para a impressora.",
+      });
     });
-  });
+  } catch (err) {
+    console.error("Erro durante a impressão ESC/POS:", err);
+    res.status(500).json({
+      error: "Ocorreu um erro ao tentar imprimir.",
+      details: err.message,
+    });
+  }
 });
 
-// ===== INICIALIZAÇÃO DO SERVIDOR =====
+// INICIALIZAÇÃO DO SERVIDOR
 app.listen(PORT, "0.0.0.0", () => {
   console.log(`=================================================`);
-  console.log(`✅ Print Agent iniciado no modo de rede!`);
+  console.log(`✅ Print Agent (Modo Inteligente) iniciado!`);
   console.log(`👂 Escutando em: http://localhost:${PORT} e na sua rede local.`);
   console.log(`=================================================`);
 });
